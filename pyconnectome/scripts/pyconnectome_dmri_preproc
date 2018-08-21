@@ -275,7 +275,7 @@ def get_cmd_line_args():
     parser.add_argument(
         "-D", "--topup-b0-dir",
         metavar="<path>", nargs="+", choices=("i", "i-", "j", "j-"),
-        help="The b0 data enc.directions.")    
+        help="The b0 data enc.directions.")
     parser.add_argument(
         "-K", "--t1-mask",
         type=is_file, metavar="<path>",
@@ -751,7 +751,6 @@ if not inputs["skip_susceptibility"]:
 
 # Create an zero deformation field
 else:
-
     # Coregistration only
     dwi_corrected_fileroot = os.path.join(brainsuite_dir, "epi2struct")
     corrected_epi_file, _, _ = epi_reg(
@@ -819,7 +818,7 @@ eddy_outroot = os.path.join(
     eddy_outputdir, "{0}_dwi_eddy_corrected".format(inputs["subject"]))
 field = None
 if fieldmap_hz_to_diff_file is not None:
-    field = fieldmap_hz_to_diff_file.replace(".nii.gz", "")   
+    field = fieldmap_hz_to_diff_file.replace(".nii.gz", "")
 corrected_dwi, corrected_bvec = eddy(
     dwi=inputs["dwi"],
     dwi_brain_mask=nodif_brain_mask_undistorted,

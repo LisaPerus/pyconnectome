@@ -161,6 +161,9 @@ def get_cmd_line_args():
 
     # Optional argument
     parser.add_argument(
+        "-R", "--round-readout-time", action="store_true",
+        help="Round read out time value to 3 digits after the decimal point.")
+    parser.add_argument(
         "-V", "--verbose",
         type=int, choices=[0, 1, 2], default=2,
         help="Increase the verbosity level: 0 silent, [1, 2] verbose.")
@@ -239,34 +242,31 @@ if dcm_info is None:
         raise ValueError("No files in '{0}'.".format(output_dicom_dir))
     dicom_img = dicom.read_file(dicom_files[0])
 
-# Get dicom information
-if dcm_info is None:
+    # Get dicom information
     dcm_info = get_dcm_info(
         dicom_dir=output_dicom_dir,
         outdir=output_sub_dir,
         dicom_img=dicom_img)
+
 subject_data["PhaseEncodingDirection"] = dcm_info["PhaseEncodingDirection"]
 subject_data["Manufacturer"] = dcm_info["Manufacturer"]
 subject_data["MagneticFieldStrength"] = dcm_info["MagneticFieldStrength"]
 
-# Get read out time
-if "TotalReadoutTime" in dcm_info:
-    readout_time = dcm_info["TotalReadoutTime"]
-else:
-    readout_time = get_readout_time(
-        dicom_img=dicom_img,
-        dcm_info=dcm_info)
-subject_data["TotalReadoutTime"] = readout_time
-
-# Get dwell time
-if "DwellTime" in dcm_info:
-    dwell_time = 1. / (dcm_info["BandwidthPerPixelPhaseEncode"] *
-                       dcm_info["AcquisitionMatrixPE"])
-else:
-    dwell_time = get_dwell_time(
-        dicom_img=dicom_img,
-        dcm_info=dcm_info)
+# Get dwell time (effective echo spacing)
+dwell_time = get_dwell_time(
+    dicom_img=dicom_img,
+    dcm_info=dcm_info)
 subject_data["DwellTime"] = dwell_time
+
+# Get read out time
+readout_time = get_readout_time(
+    dicom_img=dicom_img,
+    dcm_info=dcm_info,
+    dwell_time=dwell_time)
+
+if inputs["round_readout_time"]:
+    readout_time = round(readout_time, 3)
+subject_data["TotalReadoutTime"] = readout_time
 
 # Write eddy acqp and index files
 # https://fsl.fmrib.ox.ac.uk/fsl/fslwiki/eddy/UsersGuide#A--acqp
