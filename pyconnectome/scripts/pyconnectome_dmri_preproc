@@ -482,7 +482,6 @@ else:
 outputs["nodif_brain"] = nodif_brain
 outputs["nodif_brain_mask"] = nodif_brain_mask
 
-
 """
 2- Susceptibility correction.
 """
@@ -526,17 +525,17 @@ if not inputs["skip_susceptibility"]:
                 shfile=inputs["fsl_config"])
             erode_mask_file = os.path.join(
                 brainsuite_dir, "ero_" + os.path.basename(mag_brain_mask))
-            #im = nibabel.load(inputs["magnitude"])
-            #min_spacing = min(im.header.get_zooms()[:3])
-            #erode(
+            # im = nibabel.load(inputs["magnitude"])
+            # min_spacing = min(im.header.get_zooms()[:3])
+            # erode(
             #    input_file=mag_brain_mask,
             #    output_file=erode_mask_file,
             #    radius=min_spacing * 2,
             #    fslconfig=inputs["fsl_config"])
-            #erode_fileroot = os.path.join(
+            # erode_fileroot = os.path.join(
             #    brainsuite_dir, "ero_" + os.path.basename(
             #        mag_brain).split(".")[0])
-            #erode_file = apply_mask(
+            # erode_file = apply_mask(
             #    input_file=mag_brain,
             #    output_fileroot=erode_fileroot,
             #    mask_file=erode_mask_file,
@@ -552,10 +551,10 @@ if not inputs["skip_susceptibility"]:
                 output_fileroot=mag_brain.replace(".nii.gz", ""),
                 mask_file=mag_brain_mask,
                 fslconfig=inputs["fsl_config"])
-            #erode_file = None
+            # erode_file = None
         outputs["mag_brain"] = mag_brain
         outputs["mag_brain_mask"] = mag_brain_mask
-        #outputs["mag_brain_eroded"] = erode_file
+        # outputs["mag_brain_eroded"] = erode_file
 
         # Prepare the fieldmap
         fieldmap_file = os.path.join(brainsuite_dir, "fieldmap.nii.gz")
@@ -663,20 +662,34 @@ if not inputs["skip_susceptibility"]:
             raise ValueError("Incorrect phase encode direction: {0}...".format(
                              inputs["phase-encode-dir"]))
 
-        # Start corection
-        (dwi_wo_susceptibility, bval, bvec, t1_in_dwi_space,
-         bo_in_t1_space, t1_brain) = susceptibility_correction_wo_fieldmap(
-            outdir=brainsuite_dir,
-            t1=inputs["t1"],
-            dwi=inputs["dwi"],
-            bval=inputs["bval"],
-            bvec=inputs["bvec"],
-            subject_id=inputs["subject"],
-            phase_enc_dir=phase_enc_dir,
-            t1_mask=brain_mask,
-            nodif_mask=nodif_brain_mask,
-            fsl_sh=inputs["fsl_config"],
-            nthread=inputs["nthread"])
+        warp_file = os.path.join(
+            brainsuite_dir, "{0}.dwi.RAS.correct.distortion.map.nii.gz".format(
+                            inputs["subject"]))
+        dwi_wo_susceptibility = os.path.join(
+            brainsuite_dir, "{0}.dwi.RAS.correct.nii.gz".format(
+                            inputs["subject"]))
+
+        # Start correction
+        if (not os.path.isfile(warp_file) and not
+                os.path.isfile(dwi_wo_susceptibility)):
+            (dwi_wo_susceptibility, bval, bvec, t1_in_dwi_space,
+             bo_in_t1_space, t1_brain) = susceptibility_correction_wo_fieldmap(
+                outdir=brainsuite_dir,
+                t1=inputs["t1"],
+                dwi=inputs["dwi"],
+                bval=inputs["bval"],
+                bvec=inputs["bvec"],
+                subject_id=inputs["subject"],
+                phase_enc_dir=phase_enc_dir,
+                t1_mask=brain_mask,
+                nodif_mask=nodif_brain_mask,
+                fsl_sh=inputs["fsl_config"],
+                nthread=inputs["nthread"])
+        else:
+            t1_in_dwi_space = os.path.join(
+                brainsuite_dir,
+                "{0}.bfc.D_coord.nii.gz".format(
+                    inputs["subject"]))
 
         # If necessary, clean intermediate outputs
         if inputs["clean"]:
@@ -709,9 +722,6 @@ if not inputs["skip_susceptibility"]:
                 to_rm_file = os.path.join(
                     brainsuite_dir, basename.format(inputs["subject"]))
                 os.remove(to_rm_file)
-        warp_file = os.path.join(
-            brainsuite_dir, "{0}.dwi.RAS.correct.distortion.map.nii.gz".format(
-                            inputs["subject"]))
         outputs["pixel_shift_map"] = warp_file
 
         # Reorganize deformation field volume
@@ -735,19 +745,16 @@ if not inputs["skip_susceptibility"]:
                              phase_enc_dir))
         deformation_field_img = nibabel.Nifti1Image(
             deformation_field, distortion_img.affine)
+
         deformation_field_file = os.path.join(brainsuite_dir, "field.nii.gz")
         nibabel.save(deformation_field_img, deformation_field_file)
         outputs["warp_file"] = deformation_field_file
 
-        # Create a field map from the pixel shift warp
-        fieldmap_file = os.path.join(brainsuite_dir, "fieldmap.nii.gz")
-        fieldmap_file, fieldmap_hz_to_diff_file = pixel_shift_to_fieldmap(
-            pixel_shift_file=warp_file,
-            dwell_time=inputs["dwell_time"],
-            output_file=fieldmap_file,
-            fsl_sh=inputs["fsl_config"])
-        outputs["fieldmap"] = fieldmap_file
-        outputs["fieldmap_hz"] = fieldmap_hz_to_diff_file
+        # Create a null field map
+        fieldmap_hz_to_diff_file = None
+        outputs["fieldmap"] = None
+        outputs["fieldmap_hz"] = None
+
 
 # Create an zero deformation field
 else:
@@ -794,6 +801,8 @@ if susceptibility_method == "b0map":
         post_affine_file=t1_to_nodif_mat,
         interp="nn",
         shfile=inputs["fsl_config"])
+    eddy_dwi_input = inputs["dwi"]
+
 elif susceptibility_method == "topup":
     nodif_brain_, nodif_brain_mask_, _, _, _, _, _, _, _, _, _ = bet2(
         input_file=mean_corrected_b0s,
@@ -803,6 +812,8 @@ elif susceptibility_method == "topup":
         f=inputs["bet_threshold_nodiff"],
         shfile=inputs["fsl_config"])
     shutil.copy2(nodif_brain_mask_, nodif_brain_mask_undistorted)
+    eddy_dwi_input = inputs["dwi"]
+
 else:
     applywarp(
         in_file=nodif_brain_mask,
@@ -811,6 +822,17 @@ else:
         warp_file=deformation_field_file,
         interp="nn",
         shfile=inputs["fsl_config"])
+    susceptibility_corrected_dwi = os.path.join(
+        brainsuite_dir, "susceptibility_corrected_dwi.nii.gz")
+    applywarp(
+        in_file=inputs["dwi"],
+        ref_file=inputs["dwi"],
+        out_file=susceptibility_corrected_dwi,
+        warp_file=deformation_field_file,
+        interp="spline",
+        shfile=inputs["fsl_config"])
+    eddy_dwi_input = susceptibility_corrected_dwi
+
 eddy_outputdir = os.path.join(inputs["outdir"], "3-Eddy")
 if not os.path.isdir(eddy_outputdir):
     os.mkdir(eddy_outputdir)
@@ -819,8 +841,9 @@ eddy_outroot = os.path.join(
 field = None
 if fieldmap_hz_to_diff_file is not None:
     field = fieldmap_hz_to_diff_file.replace(".nii.gz", "")
+
 corrected_dwi, corrected_bvec = eddy(
-    dwi=inputs["dwi"],
+    dwi=eddy_dwi_input,
     dwi_brain_mask=nodif_brain_mask_undistorted,
     acqp=inputs["acqp"],
     index=inputs["index"],
@@ -832,15 +855,6 @@ corrected_dwi, corrected_bvec = eddy(
     fsl_sh=inputs["fsl_config"])
 corrected_dwi_undistorted = os.path.join(
     inputs["outdir"], "dwi_corrected.nii.gz")
-#if susceptibility_method == "reg":
-#    applywarp(
-#        in_file=corrected_dwi,
-#        ref_file=corrected_dwi,
-#        out_file=corrected_dwi_undistorted,
-#        warp_file=deformation_field_file,
-#        interp="spline",
-#        shfile=inputs["fsl_config"])
-#else:
 shutil.copy2(corrected_dwi, corrected_dwi_undistorted)
 corrected_bvec_undistorted = os.path.join(
     inputs["outdir"], "dwi_corrected.bvec")
@@ -889,7 +903,7 @@ if not os.path.isdir(tensor_outdir):
     corrected_dwi,
     corrected_bvec,
     inputs["bval"],
-    nodif_brain_mask,
+    nodif_brain_mask_undistorted,
     tensor_outdir,
     save_tensor=True,
     fslconfig=inputs["fsl_config"])
