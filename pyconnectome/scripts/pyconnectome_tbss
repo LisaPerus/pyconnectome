@@ -197,6 +197,9 @@ def get_cmd_line_args():
         help="use the FMRIB58 mean FA image and its derived skeleton, "
              "instead of the mean of the subjects.")
     parser.add_argument(
+        "-E", "--tbss-reg-cpus", type=int,
+        help="Number of CPUs for tbss reg.")
+    parser.add_argument(
         "-T", "--threshold-fa-skeleton", type=float, default=0.2,
         help="Threshold for the mean FA skeleton.")
     parser.add_argument(
@@ -257,7 +260,6 @@ with open(inputs["fa_files"], "rt") as open_file:
 """
 Pre-Step: copy/renaming
 """
-
 if inputs["init"]:
     print("Copying FA files in tbss directory...")
     for sid, fa_file in zip(subjects, fa_files):
@@ -272,7 +274,6 @@ if inputs["init"]:
 """
 Step 1: preproc
 """
-
 if inputs["preproc"]:
     print("Preprocessing FA files...")
     fa_dir, orig_dir = tbss_1_preproc(
@@ -285,7 +286,6 @@ if inputs["preproc"]:
 """
 Step 2: registration
 """
-
 if inputs["registration"]:
     print("Registering FA files to template...")
     tbss_2_reg(
@@ -293,13 +293,13 @@ if inputs["registration"]:
         use_fmrib58_fa_1mm=inputs["use_fmrib58_fa"],
         target_img=inputs["use_target_img"],
         find_best_target=inputs["find_best_target"],
+        nb_cpus=inputs["tbss_reg_cpus"],
         fsl_sh=inputs["fsl_config"])
 
 
 """
 Step 3: apply registration and create skeleton
 """
-
 if inputs["postreg"]:
     print("Applying transformation FA files and creating mean FA...")
     all_fa, mean_fa, mean_fa_mask, mean_fa_skel = tbss_3_postreg(
@@ -315,7 +315,6 @@ if inputs["postreg"]:
 """
 Step 4: stats
 """
-
 if inputs["pre_stats"]:
     print("Project the FA data onto the mean FA skeleton....")
     (all_fa_skeletonized, mean_fa_skel_mask, mean_fa_skel_mask_dst,
@@ -332,7 +331,10 @@ if inputs["pre_stats"]:
 """
 Dump subjects
 """
-subjects_file = os.path.join(tbss_dir, "stats", "subjects.txt")
+stats_dir = os.path.join(tbss_dir, "stats")
+if not os.path.isdir(stats_dir):
+    os.mkdir(stats_dir)
+subjects_file = os.path.join(stats_dir, "subjects.txt")
 ordered_subjects = [
     elem.split(".")[0]
     for elem in sorted(glob.glob1(os.path.join(tbss_dir, "FA"), "*_FA.*"))]

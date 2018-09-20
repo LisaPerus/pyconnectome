@@ -959,7 +959,7 @@ if not inputs["skip_susceptibility"]:
         marker_coords=(5, -9, 7),
         resolution=300)
 
-    # T1 overlayed with corrected nodif snap
+    # Corrected nodif overlayed with T1 snap
     t1_corrected_nodif_snap = triplanar(
         input_file=corrected_nodiff_undistorted,
         output_fileroot=os.path.join(qc_dir, "t1_corrected_nodif"),

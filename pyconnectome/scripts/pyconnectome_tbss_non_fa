@@ -89,9 +89,9 @@ def get_cmd_line_args():
         "-s", "--subjects-info",
         type=is_file, required=True, metavar="<path>",
         help="First column must be subjects' IDS, "
-             "second column must contain paths to files and third column must "
-             "contain basename of subjects' FA files in TBSS orig data. "
-             "Expected separator is a comma.")
+             "second column must contain paths to modality files and third "
+             "column must contain basename of subjects' FA files in TBSS orig "
+             "data. Expected separator is a comma.")
     required.add_argument(
         "-t", "--tbss-dir",
         type=is_directory, required=True, metavar="<path>",
