@@ -931,6 +931,7 @@ def tbss_pipeline(tbss_dir, find_best_target=True, use_fmrib58_fa_1mm=False,
     print("TBSS post-registration...")
     all_FA, mean_FA, mean_FA_mask, mean_FA_skel = tbss_3_postreg(
         tbss_dir=tbss_dir,
+        target_img=target_img,
         use_fmrib58_fa_mean_and_skel=use_fmrib58_fa_mean_and_skel,
         fsl_sh=fsl_sh)
 
@@ -1060,7 +1061,8 @@ def tbss_2_reg(tbss_dir, use_fmrib58_fa_1mm=False, target_img=None,
                              for name in fa_basenames)
 
 
-def tbss_3_postreg(tbss_dir, use_fmrib58_fa_mean_and_skel=True,
+def tbss_3_postreg(tbss_dir, target_img=None,
+                   use_fmrib58_fa_mean_and_skel=True,
                    fsl_sh=DEFAULT_FSL_PATH):
     """ Wraps fsl tbss_3_postreg command to apply the nonlinear transforms
     found in the previous stage to all subjects to bring them into
@@ -1074,6 +1076,9 @@ def tbss_3_postreg(tbss_dir, use_fmrib58_fa_mean_and_skel=True,
     ----------
     tbss_dir: str (required)
         path to tbss root directory.
+    target_img: str (optional, default None)
+        if set, will replace mean_FA by FA template target img and mask it with
+        mean_FA_mask.
     use_fmrib58_fa_mean_and_skel: bool (optional, default True)
         use the FMRIB58_FA mean FA image and its derived skeleton, instead of
         the mean of the subjects.
@@ -1112,6 +1117,15 @@ def tbss_3_postreg(tbss_dir, use_fmrib58_fa_mean_and_skel=True,
             raise ValueError(
                 "tbss_3_postreg outputs : {0} does not exist! FSL error: "
                 "{1}".format(out_file, fslprocess.stderr))
+
+    # If template FA is given, replace mean_FA with it
+    if target_img is not None:
+        print("Copying '{0}' as mean_FA...".format(target_img))
+        shutil.copy(target_img, mean_FA)
+        cmd = ["fslmaths", mean_FA, "-mas", mean_FA_mask, mean_FA]
+        fslprocess = FSLWrapper(cmd, shfile=fsl_sh)
+        fslprocess()
+
     return all_FA, mean_FA, mean_FA_mask, mean_FA_skel
 
 
@@ -1159,3 +1173,22 @@ def tbss_4_prestats(tbss_dir, threshold=0.2, fsl_sh=DEFAULT_FSL_PATH):
     thresh_file = os.path.join(tbss_dir, "stats", "thresh.txt")
     return (all_FA_skeletonized, mean_FA_skel_mask, mean_FA_skel_mask_dst,
             thresh_file)
+
+
+def fsl_mask(input_im, output_im, mask_im, fsl_sh=DEFAULT_FSL_PATH):
+    """ Wraps fsl fslmaths command to apply a mask to an input image.
+
+    Parameters
+    ----------
+    input_im: str (required)
+        path to input image.
+    output_im: str (required)
+        path to output masked image.
+    mask_im: str (required)
+        path to mask image
+    fsl_sh: str
+        path to fsl setup sh file.
+    """
+    cmd = ["fslmaths", input_im, "-mas", mask_im, output_im]
+    fslprocess = FSLWrapper(cmd, shfile=fsl_sh)
+    fslprocess()
