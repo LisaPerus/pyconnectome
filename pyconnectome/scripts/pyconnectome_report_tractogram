@@ -81,6 +81,7 @@ def is_file(filepath):
         raise argparse.ArgumentError("File does not exist: %s" % filepath)
     return filepath
 
+
 def is_directory(dirarg):
     """ Type for argparse - checks that directory exists.
     """
@@ -256,8 +257,9 @@ shutil.rmtree(os.path.dirname(tractogram))
 """
 Generate QC reporting
 """
-reportfile = os.path.join(inputs["outdir"], "Tractogram_{0}_{1}_{2}.pdf".format(
-    inputs["projectname"], inputs["sid"], inputs["timepoint"]))
+reportfile = os.path.join(
+    inputs["outdir"], "Tractogram_{0}_{1}_{2}.pdf".format(
+        inputs["projectname"], inputs["sid"], inputs["timepoint"]))
 tic = datetime.now()
 generate_pdf(
     datapath=inputs["outdir"],
@@ -292,10 +294,10 @@ if not os.path.isdir(logdir):
     os.mkdir(logdir)
 params = locals()
 outputs = dict([(name, params[name])
-               for name in ("density_map", "density_snap", "density_large_snap",
-                            "ends_density_map", "ends_density_snap",
-                            "ends_density_large_snap", "fiber_lengths_hist",
-                            "reportfile")])
+               for name in ("density_map", "density_snap",
+                            "density_large_snap", "ends_density_map",
+                            "ends_density_snap", "ends_density_large_snap",
+                            "fiber_lengths_hist", "reportfile")])
 for name, final_struct in [("inputs", inputs), ("outputs", outputs),
                            ("runtime", runtime)]:
     log_file = os.path.join(logdir, "{0}.json".format(name))
