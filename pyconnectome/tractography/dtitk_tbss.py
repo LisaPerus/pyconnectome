@@ -11,6 +11,7 @@ import os
 import glob
 import re
 import shutil
+import subprocess
 import multiprocessing
 
 # Third-Party import
@@ -25,6 +26,25 @@ from joblib import Parallel, delayed
 """
 DTI-Tk Preprocessing
 """
+
+
+def dtitk_version():
+    """ Return the DTI-TK version.
+
+    Returns
+    -------
+    version: str
+        the DTI-TK version.
+    """
+    # Check DTI-TK has been configured so the command can be found
+    process = subprocess.Popen(["which", "TVtool"],
+                               stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE)
+    stdout, stderr = process.communicate()
+    exitcode = process.returncode
+    if exitcode != 0:
+        raise ValueError("Please check DTI-TK is installed properly.")
+    return stdout.split(os.sep)[-3]
 
 
 def dtitk_import_tensors(basename, output_dir, tool="FSL",
@@ -79,7 +99,8 @@ def dtitk_import_tensors(basename, output_dir, tool="FSL",
         if outliers:
             # Remove outliers quantified with tensor norm
             tensor_norm, tensor_non_outliers = remove_outliers(
-                tensor_dtitk=tensor_dtitk)
+                tensor_dtitk=tensor_dtitk,
+                norm_outlier_threshold=100)
 
         if spd:
             # Convert to SPD
@@ -106,6 +127,10 @@ def dtitk_import_tensors(basename, output_dir, tool="FSL",
                 vsize=vsize,
                 size=size,
                 out_file=tensor_dtitk)
+    else:
+        raise NotImplementedError(
+            "Interoperability between DTI-TK and {0} has not been implemented"
+            " yet.".format(tool))
 
     return tensor_dtitk
 
@@ -131,23 +156,17 @@ def convert_fsl_to_nifti_tensor_format(basename, out_dir, tool="FSL"):
     tensor_dtitk: str
         path to the created .nii file usable by dti-tk.
     """
-    if tool == "FSL":
-        if not os.path.isdir(out_dir):
-            raise ValueError("convert_fsl_to_nifti_tensor_format: invalid"
-                             " output directory {0}...".format(out_dir))
-        tensor_dtitk = "{0}_dtitk.nii.gz".format(
-            os.path.join(out_dir, os.path.basename(basename)))
+    if not os.path.isdir(out_dir):
+        raise ValueError("convert_fsl_to_nifti_tensor_format: invalid"
+                         " output directory {0}...".format(out_dir))
+    tensor_dtitk = "{0}_dtitk.nii.gz".format(
+        os.path.join(out_dir, os.path.basename(basename)))
 
-        # Convert from FSL eigensystem (_V{1,2,3} and _L{1,2,3}) to
-        # NIfTI tensor format
-        cmd = "TVFromEigenSystem -basename {0} -out {1} -type FSL".format(
-              basename, tensor_dtitk)
-        os.system(cmd)
-
-    else:
-        raise NotImplementedError(
-            "Interoperability between DTI-TK and {0} has not been implemented"
-            " yet.".format(tool))
+    # Convert from FSL eigensystem (_V{1,2,3} and _L{1,2,3}) to
+    # NIfTI tensor format
+    cmd = "TVFromEigenSystem -basename {0} -out {1} -type FSL".format(
+          basename, tensor_dtitk)
+    os.system(cmd)
 
     return tensor_dtitk
 
@@ -182,8 +201,8 @@ def remove_outliers(tensor_dtitk, norm_outlier_threshold=100):
     # Binary thresholding to identify outlier voxels
     tensor_non_outliers = re.sub(".nii.gz", "_non_outliers.nii.gz",
                                  tensor_dtitk)
-    cmd = ("BinaryThresholdImageFilter {0} {1} 0 {2} 1 0".format(
-        tensor_norm, tensor_non_outliers, str(norm_outlier_threshold)))
+    cmd = "BinaryThresholdImageFilter {0} {1} 0 {2} 1 0".format(
+        tensor_norm, tensor_non_outliers, str(norm_outlier_threshold))
     os.system(cmd)
 
     # Remove outlier voxels by masking
@@ -528,26 +547,27 @@ def dti_rigid_reg(template, subject, output_dir, SMoption="EDS",
 
     Returns
     -------
-    registered_subject: str
-        path to the registered subject.
+    registered_dti: str
+        path to the registered DTI.
     transformation: str
         path to the transformation file.
     """
-    if not os.getcwd() == output_dir:
-        os.chdir(output_dir)
-    cmd = ["dti_rigid_reg", template, subject, SMoption, str(sep[0]),
+    local_dti = os.path.join(output_dir, os.path.basename(dti))
+    if not os.path.isfile(local_dti):
+        os.symlink(dti, local_dti)
+    cmd = ["dti_rigid_reg", template, local_dti, SMoption, str(sep[0]),
            str(sep[1]), str(sep[2]), str(ftol)]
     if useInTrans:
         cmd.append("1")
     cmd = " ".join(cmd)
     os.system(cmd)
-    basename = subject.replace(".nii.gz", "")
-    registered_subject = "{0}_aff.nii.gz".format(basename)
+    basename = local_dti.replace(".nii.gz", "")
+    registered_dti = "{0}_aff.nii.gz".format(basename)
     transformation = "{0}.aff".format(basename)
-    return registered_subject, transformation
+    return registered_dti, transformation
 
 
-def dti_affine_reg(template, subject, output_dir, SMoption="EDS",
+def dti_affine_reg(template, dti, output_dir, SMoption="EDS",
                    sep=[4.0, 4.0, 4.0], ftol=0.01, useInTrans=False):
     """ Wraps DTI-TK script dti_affine_reg and affinely align a subject
     DTI volume to a template.
@@ -556,8 +576,8 @@ def dti_affine_reg(template, subject, output_dir, SMoption="EDS",
     ----------
     template: str
         the path to the template.
-    subject: str
-        the path to the subject DWI volume.
+    dti: str
+        the path to the DTI volume.
     output_dir: str
         the path to the output directory.
     SMOption: str
@@ -578,26 +598,26 @@ def dti_affine_reg(template, subject, output_dir, SMoption="EDS",
 
     Returns
     -------
-    registered_subject: str
-        path to the registered subject.
+    registered_dti: str
+        path to the registered DTI.
     transformation: str
         path to the transformation file.
     """
-    if not os.getcwd() == output_dir:
-        os.chdir(output_dir)
-    cmd = ["dti_affine_reg", template, subject, SMoption, str(sep[0]),
+    local_dti = os.path.join(output_dir, os.path.basename(dti))
+    if not os.path.isfile(local_dti):
+        os.symlink(dti, local_dti)
+    cmd = ["dti_affine_reg", template, local_dti, SMoption, str(sep[0]),
            str(sep[1]), str(sep[2]), str(ftol)]
     if useInTrans:
         cmd.append("1")
-    cmd = " ".join(cmd)
     os.system(cmd)
-    basename = subject.replace(".nii.gz", "")
-    registered_subject = "{0}_aff.nii.gz".format(basename)
+    basename = local_dti.replace(".nii.gz", "")
+    registered_dti = "{0}_aff.nii.gz".format(basename)
     transformation = "{0}.aff".format(basename)
-    return registered_subject, transformation
+    return registered_dti, transformation
 
 
-def dti_diffeomorphic_reg(template, subject, mask, output_dir, no_of_iter=6,
+def dti_diffeomorphic_reg(template, dti, mask, output_dir, no_of_iter=6,
                           ftol=0.002):
     """ Wraps DTI-TK script dti_diffeomorphic_reg and align a DTI volume
     to a template.
@@ -606,7 +626,7 @@ def dti_diffeomorphic_reg(template, subject, mask, output_dir, no_of_iter=6,
     ----------
     template: str
         the path to the template.
-    subject: str
+    dti: str
         the path to the DTI volume.
     mask: str
         the path to a binary image that has 0 for background voxels and 1 for
@@ -620,23 +640,23 @@ def dti_diffeomorphic_reg(template, subject, mask, output_dir, no_of_iter=6,
 
     Returns
     -------
-    registered_subject: str
-        path to the registered subject.
+    registered_dti: str
+        path to the registered DTI.
     transformation: str
-        path to the transformation file.
+        path to the deformation field.
     """
-    if not os.getcwd() == output_dir:
-        os.chdir(output_dir)
-    cmd = ["dti_diffeomorphic_reg", template, subject, mask, "1",
+    local_dti = os.path.join(output_dir, os.path.basename(dti))
+    if not os.path.isfile(local_dti):
+        os.symlink(dti, local_dti)
+    cmd = ["dti_diffeomorphic_reg", template, local_dti, mask, "1",
            str(no_of_iter), str(ftol)]
-    cmd = " ".join(cmd)
     os.system(cmd)
-    registered_subject = subject.replace(".nii.gz", "_aff_diffeo.nii.gz")
-    transformation = subject.replace(".nii.gz", "_aff_diffeo.df.nii.gz")
-    return registered_subject, transformation
+    registered_dti = local_dti.replace(".nii.gz", "_aff_diffeo.nii.gz")
+    transformation = local_dti.replace(".nii.gz", "_aff_diffeo.df.nii.gz")
+    return registered_dti, transformation
 
 
-def dti_warp_to_template(subject, template, voxel_dim):
+def dti_warp_to_template(dti, template, voxel_dim, output_dir):
     """ Wraps DTI-TK script dti_warp_to_template which combines the
     affine transformation and diffeomorphic displacement field into
     one single displacement field and brings the subject's original data
@@ -645,27 +665,34 @@ def dti_warp_to_template(subject, template, voxel_dim):
 
     Parameters
     ----------
-    subject: str
-        the path to the subject tensor file.
+    dti: str
+        the path to the DTI file.
     template: str
         the path to the combined displacement field (affine+deformable
         alignment) file.
     voxel_dim: array (dim 3)
         the array of voxel dimensions.
+    output_dir: str
+        the path to the output directory.
 
     Returns
     -------
-    registered_subject: str
-        path to the registered subject.
+    registered_dti: str
+        path to the registered DTI.
     combined_transformation: str
         path to the transformation combined file.
     """
+    local_dti = os.path.join(output_dir, os.path.basename(dti))
+    if not os.path.isfile(local_dti):
+        os.symlink(dti, local_dti)
     img_dim = "{0} {1} {2}".format(voxel_dim[0], voxel_dim[1], voxel_dim[2])
-    cmd = "dti_warp_to_template {0} {1} {2}".format(subject, template, img_dim)
+    cmd = "dti_warp_to_template {0} {1} {2}".format(
+        local_dti, template, img_dim)
     os.system(cmd)
-    registered_subject = subject.replace(".nii.gz", "_diffeo.nii.gz")
-    combined_transformation = subject.replace(".nii.gz", "_combined.df.nii.gz")
-    return registered_subject, combined_transformation
+    registered_dti = local_dti.replace(".nii.gz", "_diffeo.nii.gz")
+    combined_transformation = local_dti.replace(
+        ".nii.gz", "_combined.df.nii.gz")
+    return registered_dti, combined_transformation
 
 
 """
@@ -700,6 +727,7 @@ def generate_FA_map(dti_file, output_fa):
     cmd = ["mv", fa_file, output_fa_file]
     cmd = " ".join(cmd)
     os.system(cmd)
+
     return output_fa_file
 
 
@@ -848,6 +876,23 @@ def get_fa_stack_mask(fa_4D, output, fsl_sh=DEFAULT_FSL_PATH):
     return output
 
 
+def get_mean_fa(fa_4D, output, fsl_sh=DEFAULT_FSL_PATH):
+    """ Wraps fslmaths command and create a mean FA map.
+
+    Parameters
+    ----------
+    fa_4D: str
+        path to the 4D FA data.
+    output: str
+        path to the mean FA map.
+    fsl_sh: str
+        path to FSL setup sh file.
+    """
+    cmd = ["fslmaths", fa_4D, "-Tmean", output]
+    fslprocess = FSLWrapper(cmd, shfile=fsl_sh)
+    fslprocess()
+
+
 """
 TBSS
 """
@@ -931,7 +976,6 @@ def tbss_pipeline(tbss_dir, find_best_target=True, use_fmrib58_fa_1mm=False,
     print("TBSS post-registration...")
     all_FA, mean_FA, mean_FA_mask, mean_FA_skel = tbss_3_postreg(
         tbss_dir=tbss_dir,
-        target_img=target_img,
         use_fmrib58_fa_mean_and_skel=use_fmrib58_fa_mean_and_skel,
         fsl_sh=fsl_sh)
 
@@ -1061,8 +1105,7 @@ def tbss_2_reg(tbss_dir, use_fmrib58_fa_1mm=False, target_img=None,
                              for name in fa_basenames)
 
 
-def tbss_3_postreg(tbss_dir, target_img=None,
-                   use_fmrib58_fa_mean_and_skel=True,
+def tbss_3_postreg(tbss_dir, use_fmrib58_fa_mean_and_skel=True,
                    fsl_sh=DEFAULT_FSL_PATH):
     """ Wraps fsl tbss_3_postreg command to apply the nonlinear transforms
     found in the previous stage to all subjects to bring them into
@@ -1076,9 +1119,6 @@ def tbss_3_postreg(tbss_dir, target_img=None,
     ----------
     tbss_dir: str (required)
         path to tbss root directory.
-    target_img: str (optional, default None)
-        if set, will replace mean_FA by FA template target img and mask it with
-        mean_FA_mask.
     use_fmrib58_fa_mean_and_skel: bool (optional, default True)
         use the FMRIB58_FA mean FA image and its derived skeleton, instead of
         the mean of the subjects.
@@ -1117,15 +1157,6 @@ def tbss_3_postreg(tbss_dir, target_img=None,
             raise ValueError(
                 "tbss_3_postreg outputs : {0} does not exist! FSL error: "
                 "{1}".format(out_file, fslprocess.stderr))
-
-    # If template FA is given, replace mean_FA with it
-    if target_img is not None:
-        print("Copying '{0}' as mean_FA...".format(target_img))
-        shutil.copy(target_img, mean_FA)
-        cmd = ["fslmaths", mean_FA, "-mas", mean_FA_mask, mean_FA]
-        fslprocess = FSLWrapper(cmd, shfile=fsl_sh)
-        fslprocess()
-
     return all_FA, mean_FA, mean_FA_mask, mean_FA_skel
 
 
@@ -1173,22 +1204,3 @@ def tbss_4_prestats(tbss_dir, threshold=0.2, fsl_sh=DEFAULT_FSL_PATH):
     thresh_file = os.path.join(tbss_dir, "stats", "thresh.txt")
     return (all_FA_skeletonized, mean_FA_skel_mask, mean_FA_skel_mask_dst,
             thresh_file)
-
-
-def fsl_mask(input_im, output_im, mask_im, fsl_sh=DEFAULT_FSL_PATH):
-    """ Wraps fsl fslmaths command to apply a mask to an input image.
-
-    Parameters
-    ----------
-    input_im: str (required)
-        path to input image.
-    output_im: str (required)
-        path to output masked image.
-    mask_im: str (required)
-        path to mask image
-    fsl_sh: str
-        path to fsl setup sh file.
-    """
-    cmd = ["fslmaths", input_im, "-mas", mask_im, output_im]
-    fslprocess = FSLWrapper(cmd, shfile=fsl_sh)
-    fslprocess()

@@ -26,22 +26,18 @@ try:
     bredala.USE_PROFILER = False
     bredala.register("pyconnectome.tractography.dtitk_tbss",
                      names=["tbss_1_preproc", "tbss_2_reg", "tbss_3_postreg",
-                            "tbss_4_prestats", "fsl_mask", "skeletonize"])
+                            "tbss_4_prestats"])
 except:
     pass
 
 # TBSS import
 from pyconnectome.tractography.dtitk_tbss import (
-    tbss_1_preproc, tbss_2_reg, tbss_3_postreg, tbss_4_prestats, fsl_mask,
-    skeletonize)
+    tbss_1_preproc, tbss_2_reg, tbss_3_postreg, tbss_4_prestats)
 
 # Pyconnectome imports
 import pyconnectome
 from pyconnectome.wrapper import FSLWrapper
 from pyconnectome import DEFAULT_FSL_PATH
-
-# Package import
-from joblib import Parallel, delayed
 
 # Script documentation
 DOC = """
@@ -197,20 +193,9 @@ def get_cmd_line_args():
         "-I", "--use-target-img", type=is_file, metavar="<path>",
         help="Use target image for TBSS registration.")
     parser.add_argument(
-        "-K", "--use-target-skel", type=is_file, metavar="<path>",
-        help="use custom skeleton for subjects' FA projection."
-             "This assumes that the skeleton has already been thresholded "
-             "and wont be refined.")
-    parser.add_argument(
         "-M", "--use-fmrib58-fa-mean-and-skel", action="store_true",
         help="use the FMRIB58 mean FA image and its derived skeleton, "
              "instead of the mean of the subjects.")
-    parser.add_argument(
-        "-E", "--tbss-reg-cpus", type=int,
-        help="Number of CPUs for tbss reg.")
-    parser.add_argument(
-        "-D", "--tbss-stats-cpus", type=int,
-        help="Number of CPUs for tbss 4 prestats with custom skeleton.")
     parser.add_argument(
         "-T", "--threshold-fa-skeleton", type=float, default=0.2,
         help="Threshold for the mean FA skeleton.")
@@ -254,8 +239,8 @@ if verbose > 0:
 """
 Check/load input parameters
 """
-if (inputs["registration"] and not inputs["find_best_target"] and
-        not inputs["use_fmrib58_fa"] and inputs["use_target_img"] is None):
+if (inputs["registration"] and not inputs["find_best_target"]
+        and not inputs["use_fmrib58_fa"] and inputs["use_target_img"] is None):
     raise ValueError(
         "Please enter at least one parameter, -B, -F, -I for TBSS "
         "registration.")
@@ -272,6 +257,7 @@ with open(inputs["fa_files"], "rt") as open_file:
 """
 Pre-Step: copy/renaming
 """
+
 if inputs["init"]:
     print("Copying FA files in tbss directory...")
     for sid, fa_file in zip(subjects, fa_files):
@@ -286,6 +272,7 @@ if inputs["init"]:
 """
 Step 1: preproc
 """
+
 if inputs["preproc"]:
     print("Preprocessing FA files...")
     fa_dir, orig_dir = tbss_1_preproc(
@@ -298,6 +285,7 @@ if inputs["preproc"]:
 """
 Step 2: registration
 """
+
 if inputs["registration"]:
     print("Registering FA files to template...")
     tbss_2_reg(
@@ -305,18 +293,17 @@ if inputs["registration"]:
         use_fmrib58_fa_1mm=inputs["use_fmrib58_fa"],
         target_img=inputs["use_target_img"],
         find_best_target=inputs["find_best_target"],
-        nb_cpus=inputs["tbss_reg_cpus"],
         fsl_sh=inputs["fsl_config"])
 
 
 """
 Step 3: apply registration and create skeleton
 """
+
 if inputs["postreg"]:
     print("Applying transformation FA files and creating mean FA...")
     all_fa, mean_fa, mean_fa_mask, mean_fa_skel = tbss_3_postreg(
         tbss_dir=tbss_dir,
-        target_img=inputs["use_target_img"],
         use_fmrib58_fa_mean_and_skel=inputs["use_fmrib58_fa_mean_and_skel"],
         fsl_sh=inputs["fsl_config"])
     outputs["all_FA"] = all_fa
@@ -328,108 +315,29 @@ if inputs["postreg"]:
 """
 Step 4: stats
 """
+
 if inputs["pre_stats"]:
     print("Project the FA data onto the mean FA skeleton....")
-    if inputs["use_target_skel"] is not None:
-        mean_fa_mask = os.path.join(tbss_dir, "stats", "mean_FA_mask.nii.gz")
-        if not os.path.isfile(mean_fa_mask):
-            raise ValueError(
-                "Please do tbss_3_postreg before tbss_4_prestats.")
-        mean_fa_skel = os.path.join(tbss_dir, "stats",
-                                    "mean_FA_skeleton.nii.gz")
-        # Mask template skeleton with mean_FA_mask
-        fsl_mask(
-            input_im=inputs["use_target_skel"],
-            output_im=mean_fa_skel,
-            mask_im=mean_fa_mask,
-            fsl_sh=inputs["fsl_config"])
-
-        # Following Enigma DTI pipeline procedure : threshold with very low
-        # threshold mean_FA_skeleton (skeleton is supposed to have been
-        # already thresholded) and binarize to get skeleton mask.
-        thresh = 0.049
-        thresh_file = os.path.join(tbss_dir, "stats", "thresh.txt")
-        with open(thresh_file, "wt") as open_file:
-            open_file.write(str(thresh))
-        mean_fa_skel_mask = os.path.join(
-            tbss_dir, "stats", "mean_FA_skeleton_mask.nii.gz")
-        cmd = ["fslmaths", mean_fa_skel, "-thr", str(thresh), "-bin",
-               mean_fa_skel_mask]
-        fslprocess = FSLWrapper(cmd, shfile=inputs["fsl_config"])
-        fslprocess()
-
-        # Create distance map
-        mean_fa_skel_mask_dst = os.path.join(
-            tbss_dir, "stats", "mean_FA_skeleton_mask_dst.nii.gz")
-        cmd = ["fslmaths", mean_fa_mask, "-mul", "-1", "-add", "1", "-add",
-               mean_fa_skel_mask, mean_fa_skel_mask_dst]
-        fslprocess = FSLWrapper(cmd, shfile=inputs["fsl_config"])
-        fslprocess()
-
-        cmd = ["distancemap", "-i", mean_fa_skel_mask_dst, "-o",
-               mean_fa_skel_mask_dst]
-        fslprocess = FSLWrapper(cmd, shfile=inputs["fsl_config"])
-        fslprocess()
-
-        # Mask all subjects warped FA
-        nb_cpus = inputs["tbss_stats_cpus"]
-        subjects_warp_fa = glob.glob(
-            os.path.join(tbss_dir, "FA", "*_to_target.nii.gz"))
-        Parallel(n_jobs=nb_cpus)(delayed(fsl_mask)(
-            sub_warp_fa, sub_warp_fa.replace(".nii.gz", "_masked.nii.gz"),
-            mean_fa_mask, inputs["fsl_config"])
-            for sub_warp_fa in subjects_warp_fa)
-        subjects_warp_fa_masked = glob.glob(
-            os.path.join(tbss_dir, "FA", "*_to_target_masked.nii.gz"))
-
-        # Project subjects FA onto the skeleton
-        # Projected FA subjects will not be merged into all_FA_skeletonized
-        # If you wish to merge them, please refer to fsl merge.
-        fsl_dir = FSLWrapper(
-            cmd=[], shfile=inputs["fsl_config"])._environment()["FSLDIR"]
-        search_rule_mask = os.path.join(
-            fsl_dir, "data", "standard", "LowerCingulum_1mm.nii.gz")
-        subs_skel_dir = os.path.join(tbss_dir, "stats", "SPLIT_SKEL")
-        if not os.path.isdir(subs_skel_dir):
-            os.mkdir(subs_skel_dir)
-        Parallel(n_jobs=nb_cpus)(delayed(skeletonize)(
-            input_file=sub_fa,
-            output_file=None,
-            skel_threshold=str(thresh),
-            distance_map=mean_fa_skel_mask_dst,
-            search_rule_mask=search_rule_mask,
-            data_4D=sub_fa,
-            projected_4Ddata=os.path.join(
-                subs_skel_dir, os.path.basename(sub_fa).replace(
-                    ".nii.gz", "_skel.nii.gz")),
-            alternative_skeleton=mean_fa_skel_mask,
-            fsl_sh=inputs["fsl_config"]) for sub_fa in subjects_warp_fa_masked)
-        outputs["Subjects_FA_skeletonized_dir"] = subs_skel_dir
-
-    else:
-        (all_fa_skeletonized, mean_fa_skel_mask, mean_fa_skel_mask_dst,
-         thresh_file) = tbss_4_prestats(
-            tbss_dir=tbss_dir,
-            threshold=inputs["threshold_fa_skeleton"],
-            fsl_sh=inputs["fsl_config"])
-        outputs["all_FA_skeletonized"] = all_fa_skeletonized
+    (all_fa_skeletonized, mean_fa_skel_mask, mean_fa_skel_mask_dst,
+     thresh_file) = tbss_4_prestats(
+        tbss_dir=tbss_dir,
+        threshold=inputs["threshold_fa_skeleton"],
+        fsl_sh=inputs["fsl_config"])
+    outputs["all_FA_skeletonized"] = all_fa_skeletonized
     outputs["mean_FA_skel_mask"] = mean_fa_skel_mask
     outputs["mean_FA_skel_mask_dst"] = mean_fa_skel_mask_dst
-    outputs["Threshold"] = thresh_file
+    outputs["mean_FA_skel_mask_dst"] = mean_fa_skel_mask_dst
 
 
 """
 Dump subjects
 """
-stats_dir = os.path.join(tbss_dir, "stats")
-if not os.path.isdir(stats_dir):
-    os.mkdir(stats_dir)
-subjects_file = os.path.join(stats_dir, "subjects.txt")
+subjects_file = os.path.join(tbss_dir, "stats", "subjects.txt")
 ordered_subjects = [
     elem.split(".")[0]
     for elem in sorted(glob.glob1(os.path.join(tbss_dir, "FA"), "*_FA.*"))]
 with open(subjects_file, "wt") as open_file:
-    open_file.write("\n".join(ordered_subjects))
+     open_file.write("\n".join(ordered_subjects))
 
 
 """
