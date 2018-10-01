@@ -135,3 +135,52 @@ def reorient_image(in_file, axes="RAS", prefix="swap", output_directory=None,
     nibabel.save(image, out_file)
 
     return out_file
+
+
+def lpi_to_ras(in_file, out_file):
+    """ Rectify the orientation of an LPI image in order to be in the 'Ras'
+    coordinate system.
+
+    Parameters
+    ----------
+    in_file: str (mandatory)
+        the input image in LPI coordinates system.
+    out_file: str (mandatory)
+        the output image in RAS coordinates system.
+
+    Returns
+    -------
+    out_file: str
+        the rectified image.
+    """
+
+    # Check the input image exists on the file system
+    if not os.path.isfile(in_file):
+        raise ValueError("'{0}' is not a valid filename.".format(in_file))
+
+    # Inverse all pixel data array axes
+    image = nibabel.load(in_file)
+    data = image.get_data()
+    affine = image.affine
+
+    # Flip all the data array axes
+    inv_data = numpy.flip(data, 0)
+    inv_data = numpy.flip(inv_data, 1)
+    inv_data = numpy.flip(inv_data, 2)
+
+    # Inverse affine axes
+    # > Get the input image affine transform
+    if image.header["qform_code"] > 0 and image.header["sform_code"] > 0:
+        print("[warn] '{0}' image invalid 'qform_code' & "
+              "'sform_code'.".format(in_file))
+        affine = image.get_qform()
+    else:
+        affine = image.affine
+    inv_affine = affine
+    inv_affine = -1 * inv_affine
+
+    # Save output
+    image = nibabel.Nifti1Image(inv_data, inv_affine)
+    nibabel.save(image, out_file)
+
+    return out_file
