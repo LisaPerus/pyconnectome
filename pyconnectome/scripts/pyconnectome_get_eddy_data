@@ -140,8 +140,9 @@ def get_cmd_line_args():
         "-m", "--dicom",
         required=True, metavar="<path>",
         help="A compressed tarball (.tar.gz) or a folder containing the dMRI "
-             "DICOM files. We assume that all images were acquired with the "
-             "same protocol.")
+             "DICOM files or, for SIEMENS or GE only, a json file containing "
+             "dwell and read-out time. We assume that all images were acquired"
+             "with the same protocol.")
     required.add_argument(
         "-d", "--dwi",
         required=True, metavar="<path>", nargs="+", type=is_file,
@@ -161,8 +162,13 @@ def get_cmd_line_args():
 
     # Optional argument
     parser.add_argument(
-        "-M", "--dicom-info", metavar="<path>", type=is_file,
-        help="Image BIDS description file.")
+        "-O", "--topup-b0",
+        type=is_file, metavar="<path>", nargs="+",
+        help="The b0 data acquired in opposite phase enc. direction.")
+    parser.add_argument(
+        "-D", "--topup-b0-dir",
+        metavar="<path>", nargs="+", choices=("i", "i-", "j", "j-"),
+        help="The b0 data enc.directions.")
     parser.add_argument(
         "-R", "--round-readout-time", action="store_true",
         help="Round read out time value to 3 digits after the decimal point.")
@@ -222,6 +228,8 @@ subject_data["bval"] = concat_bvals
 
 # Get sequence information from dicom
 # > Unzip dicom archive
+dcm_info = None
+output_dicom_dir = None
 if os.path.isfile(inputs["dicom"]):
     if inputs["dicom"].endswith(".tar.gz"):
         output_dicom_dir = os.path.join(output_sub_dir, "dicom")
@@ -229,26 +237,30 @@ if os.path.isfile(inputs["dicom"]):
             os.mkdir(output_dicom_dir)
         cmd = ["tar", "-xzf", inputs["dicom"], "-C", output_dicom_dir]
         subprocess.check_call(cmd)
+    elif inputs["dicom"].endswith(".json"):
+        with open(inputs["dicom"], "rt") as open_file:
+            dcm_info = json.load(open_file)
     else:
         raise ValueError("Unexpected file format: '{0}'.".format(
             inputs["dicom"]))
 else:
     output_dicom_dir = inputs["dicom"]
 
-# > Get dicom information
-if inputs["dicom_info"] is None:
+# > Get dicom information if dicom json was not provided
+if dcm_info is None:
     dcm_info = get_dcm_info(
         dicom_dir=output_dicom_dir,
         outdir=output_sub_dir)
-else:
-    with open(inputs["dicom_info"], "rt") as open_file:
-        dcm_info = json.load(open_file)
 
-# Load a dicom file to get complementary dicom information
-dicom_files = glob.glob(os.path.join(output_dicom_dir, "*"))
-if len(dicom_files) == 0:
-    raise ValueError("No files in '{0}'.".format(output_dicom_dir))
-dicom_img = dicom.read_file(dicom_files[0])
+# If dicom dir or dicom tar.gz has been given, load a dicom file to get
+# complementary dicom information (necessary for Philips scanner)
+if output_dicom_dir is not None:
+    dicom_files = glob.glob(os.path.join(output_dicom_dir, "*"))
+    if len(dicom_files) == 0:
+        raise ValueError("No files in '{0}'.".format(output_dicom_dir))
+    dicom_img = dicom.read_file(dicom_files[0])
+else:
+    dicom_img = None
 
 # Get phase encoding direction
 if "PhaseEncodingDirection" in dcm_info.keys():
@@ -269,9 +281,9 @@ subject_data["DwellTime"] = dwell_time
 
 # Get read out time
 readout_time = get_readout_time(
-    dicom_img=dicom_img,
     dcm_info=dcm_info,
-    dwell_time=dwell_time)
+    dwell_time=dwell_time,
+    dicom_img=dicom_img)
 
 if inputs["round_readout_time"]:
     readout_time = round(readout_time, 3)
@@ -282,18 +294,62 @@ subject_data["TotalReadoutTime"] = readout_time
 acqp_file = os.path.join(output_sub_dir, "acqp.txt")
 with open(acqp_file, "wt") as open_file:
     if dcm_info["Manufacturer"].upper() == "SIEMENS":
-        if dcm_info["PhaseEncodingDirection"] == "i":
-            open_file.write("1 0 0 {0}".format(readout_time))
-        elif dcm_info["PhaseEncodingDirection"] == "i-":
-            open_file.write("-1 0 0 {0}".format(readout_time))
-        elif dcm_info["PhaseEncodingDirection"] == "j":
-            open_file.write("0 1 0 {0}".format(readout_time))
-        elif dcm_info["PhaseEncodingDirection"] == "j-":
-            open_file.write("0 -1 0 {0}".format(readout_time))
+        if inputs["topup_b0"] is not None:
+            if len(inputs["topup_b0"]) != len(inputs["topup_b0_dir"]):
+                raise ValueError(
+                    "Please specify properly the topup input data.")
+            data = []
+            affine = None
+            for enc_dir, path in zip(
+                    inputs["topup_b0_dir"], inputs["topup_b0"]):
+                im = nibabel.load(path)
+                if affine is None:
+                    affine = im.affine
+                else:
+                    assert numpy.allclose(affine, im.affine)
+                arr = im.get_data()
+                for cnt, size in enumerate(arr.shape[:3]):
+                    if size % 2 == 1:
+                        print("[warn] reducing TOPUP B0 image size.")
+                        arr = numpy.delete(arr, -1, axis=cnt)
+                if arr.ndim == 3:
+                    arr.shape += (1, )
+                data.append(arr)
+                nvol = arr.shape[-1]
+                if enc_dir == "i":
+                    row = "1 0 0 {0}".format(readout_time)
+                elif enc_dir == "i-":
+                    row = "-1 0 0 {0}".format(readout_time)
+                elif enc_dir == "j":
+                    row = "0 1 0 {0}".format(readout_time)
+                elif enc_dir == "j-":
+                    row = "0 -1 0 {0}".format(readout_time)
+                else:
+                    raise ValueError("Unknown encode phase direction : "
+                                     "{0}...".format(enc_dir))
+                for indx in range(nvol):
+                    open_file.write(row + "\n")
+
+            # Save concatenated opposed phase encode dir images
+            concatenated_b0s_file = os.path.join(
+                output_sub_dir, "concatenated_b0s.nii.gz")
+            concatenated_b0s = numpy.concatenate(data, axis=-1)
+            concatenated_b0s_im = nibabel.Nifti1Image(concatenated_b0s, affine)
+            nibabel.save(concatenated_b0s_im, concatenated_b0s_file)
+            subject_data["concat+_b0_opposed_polarity"] = concatenated_b0s_file
         else:
-            raise ValueError(
-                "Unknown encode phase direction : {0}...".format(
-                    dcm_info["PhaseEncodingDirection"]))
+            if dcm_info["PhaseEncodingDirection"] == "i":
+                open_file.write("1 0 0 {0}".format(readout_time))
+            elif dcm_info["PhaseEncodingDirection"] == "i-":
+                open_file.write("-1 0 0 {0}".format(readout_time))
+            elif dcm_info["PhaseEncodingDirection"] == "j":
+                open_file.write("0 1 0 {0}".format(readout_time))
+            elif dcm_info["PhaseEncodingDirection"] == "j-":
+                open_file.write("0 -1 0 {0}".format(readout_time))
+            else:
+                raise ValueError(
+                    "Unknown encode phase direction : {0}...".format(
+                        dcm_info["PhaseEncodingDirection"]))
     else:
         print("Only phase encoding direction is assured for subject {0},"
               "orientation may be negative or positive.".format(
