@@ -34,7 +34,7 @@ try:
     bredala.register("pyconnectome.utils.preproctools",
                      names=["eddy", "fsl_prepare_fieldmap", "epi_reg",
                             "smooth_fieldmap", "pixel_shift_to_fieldmap",
-                            "fieldmap_reflect", "topup"])
+                            "fieldmap_reflect", "topup", "convertwarp"])
     bredala.register("pyconnectome.models.tensor",
                      names=["dtifit"])
     bredala.register("pyconnectome.utils.filetools",
@@ -71,6 +71,7 @@ from pyconnectome.utils.preproctools import smooth_fieldmap
 from pyconnectome.utils.preproctools import pixel_shift_to_fieldmap
 from pyconnectome.utils.preproctools import fieldmap_reflect
 from pyconnectome.utils.preproctools import topup
+from pyconnectome.utils.preproctools import convertwarp
 from pyconnectome.models.tensor import dtifit
 from pyconnectome.utils.filetools import fslreorient2std
 from pyconnectome.utils.filetools import apply_mask
@@ -269,13 +270,9 @@ def get_cmd_line_args():
 
     # Optional argument
     parser.add_argument(
-        "-O", "--topup-b0",
-        type=is_file, metavar="<path>", nargs="+",
-        help="The b0 data acquired in opposite phase enc. direction.")
-    parser.add_argument(
-        "-D", "--topup-b0-dir",
-        metavar="<path>", nargs="+", choices=("i", "i-", "j", "j-"),
-        help="The b0 data enc.directions.")
+        "-O", "--topup-b0", type=is_file, metavar="<path>",
+        help="The concatenated b0 data acquired in opposite phase enc. "
+             "direction.")
     parser.add_argument(
         "-K", "--t1-mask",
         type=is_file, metavar="<path>",
@@ -608,7 +605,7 @@ if not inputs["skip_susceptibility"]:
         dwi_corrected_fileroot = os.path.join(susceptibility_dir, "epi2struct")
         # echo_spacing = inputs["echo_spacing"] / (
         #     1000 * inputs["parallel_acceleration_factor"])
-        corrected_epi_file, warp_file, distortion_map = epi_reg(
+        corrected_epi_file, epi_to_t1_warp_file, pixel_shift_map = epi_reg(
             epi_file=inputs["dwi"],
             structural_file=inputs["t1"],
             brain_structural_file=brain_img,
@@ -620,38 +617,36 @@ if not inputs["skip_susceptibility"]:
             phase_encode_dir=phase_enc_dir,
             wmseg_file=inputs["wm_seg"],
             fsl_sh=inputs["fsl_config"])
-        nodif_to_t1_mat = os.path.join(susceptibility_dir, "epi2struct.mat")
         t1_to_nodif_mat = os.path.join(
             susceptibility_dir, "epi2struct_inv.mat")
-        outputs["corrected_epi_file"] = corrected_epi_file
-        outputs["pixel_shift_map"] = distortion_map
 
-        # Reorganize deformation field volume
-        if not os.path.isfile(distortion_map):
-            raise ValueError("Unavailable warp file: {0}".format(
-                distortion_map))
-        distortion_img = nibabel.load(distortion_map)
-        distortion_img_data = distortion_img.get_data()
-        distortion_img_data.shape += (1,)
-        spacing = distortion_img.header.get_zooms()
-        zero_field = numpy.zeros(distortion_img_data.shape)
-        if phase_enc_dir in ("x", "x-"):
-            deformation_field = numpy.concatenate(
-                (distortion_img_data * spacing[0], zero_field, zero_field),
-                axis=3)
-        elif phase_enc_dir in ("y", "y-"):
-            deformation_field = numpy.concatenate(
-                (zero_field, distortion_img_data * spacing[1], zero_field),
-                axis=3)
-        else:
-            raise ValueError("Incorrect phase encode direction: {0}".format(
-                             phase_enc_dir))
-        deformation_field_img = nibabel.Nifti1Image(
-            deformation_field, distortion_img.affine)
-
+        # Fugue can be used to correct susceptibility by applying directly
+        # the fieldmap in EPI space as follow:
+        # > Create a binary mask of fieldmap in EPI space.
+        # fslmaths epi_reg_fileroot_fieldmaprads2epi \
+        #    -abs \
+        #    -bin \
+        #    epi_reg_fileroot_fieldmaprads2epi_mask
+        # > Apply fielmap
+        # fugue \
+        #   -i epi.nii.gz \
+        #   -u epi_corrected.nii.gz \
+        #   --loadfmap=epi_reg_fileroot_fieldmaprads2epi \
+        #   --mask=epi_reg_fileroot_fieldmaprads2epi_mask \
+        #   --dwell=dwell_time \
+        #   --unwarpdir=phase_enc_dir
+        # Another way, which was tested and lead to the same result is to
+        # compute the susceptibility deformation field from the pixel shift map
+        # outputted by epi_reg and to later apply it to EPI image to correct
+        # for susceptibility.
         deformation_field_file = os.path.join(
             susceptibility_dir, "field.nii.gz")
-        nibabel.save(deformation_field_img, deformation_field_file)
+        convertwarp(
+            ref=inputs["dwi"],
+            out=deformation_field_file.replace(".nii.gz", ""),
+            shiftmap=pixel_shift_map,
+            shiftdir=phase_enc_dir,
+            fsl_sh=inputs["fsl_config"])
         outputs["warp_file"] = deformation_field_file
 
     # FSL topup
@@ -662,8 +657,8 @@ if not inputs["skip_susceptibility"]:
 
         # Topup
         fieldmap_hz_to_diff_file, corrected_b0s, mean_corrected_b0s = topup(
-            b0s=inputs["topup_b0"],
-            phase_enc_dirs=inputs["topup_b0_dir"],
+            concat_b0s=inputs["topup_b0"],
+            acqp_file=inputs["acqp"],
             readout_time=inputs["readout_time"],
             outroot=susceptibility_dir,
             fsl_sh=inputs["fsl_config"])
@@ -679,19 +674,6 @@ if not inputs["skip_susceptibility"]:
                 arr = numpy.delete(arr, -1, axis=cnt)
         im = nibabel.Nifti1Image(arr, im.affine)
         nibabel.save(im, inputs["dwi"])
-
-        # Coregistration only
-        dwi_corrected_fileroot = os.path.join(susceptibility_dir, "epi2struct")
-        corrected_epi_file, _, _ = epi_reg(
-            epi_file=inputs["dwi"],
-            structural_file=inputs["t1"],
-            brain_structural_file=brain_img,
-            output_fileroot=dwi_corrected_fileroot,
-            wmseg_file=None,
-            fsl_sh=inputs["fsl_config"])
-        nodif_to_t1_mat = os.path.join(susceptibility_dir, "epi2struct.mat")
-        t1_to_nodif_mat = os.path.join(
-            susceptibility_dir, "epi2struct_inv.mat")
 
     # Brainsuite
     else:
@@ -712,7 +694,7 @@ if not inputs["skip_susceptibility"]:
             raise ValueError("Incorrect phase encode direction: {0}...".format(
                              inputs["phase-encode-dir"]))
 
-        warp_file = os.path.join(
+        pixel_shift_map = os.path.join(
             susceptibility_dir,
             "{0}.dwi.RAS.correct.distortion.map.nii.gz".format(
                 inputs["subject"]))
@@ -724,7 +706,7 @@ if not inputs["skip_susceptibility"]:
                 inputs["subject"]))
 
         # Start correction
-        if (not os.path.isfile(warp_file) and not
+        if (not os.path.isfile(pixel_shift_map) and not
                 os.path.isfile(dwi_wo_susceptibility) and not
                 os.path.isfile(t1_in_dwi_space)):
             (dwi_wo_susceptibility, bval, bvec, t1_in_dwi_space,
@@ -776,12 +758,13 @@ if not inputs["skip_susceptibility"]:
                 to_rm_file = os.path.join(
                     susceptibility_dir, basename.format(inputs["subject"]))
                 os.remove(to_rm_file)
-        outputs["pixel_shift_map"] = warp_file
+        outputs["pixel_shift_map"] = pixel_shift_map
 
         # Reorganize deformation field volume
-        if not os.path.isfile(warp_file):
-            raise ValueError("Unavailable warp file: {0}".format(warp_file))
-        distortion_img = nibabel.load(warp_file)
+        if not os.path.isfile(pixel_shift_map):
+            raise ValueError("Unavailable pixel shift map file: {0}".format(
+                pixel_shift_map))
+        distortion_img = nibabel.load(pixel_shift_map)
         distortion_img_data = distortion_img.get_data()
         distortion_img_data.shape += (1,)
         spacing = distortion_img.header.get_zooms()
@@ -850,7 +833,7 @@ if susceptibility_method == "topup":
 else:
     # For now, except for topup sequences, susceptibility is corrected by
     # applying a voxel shift map generated from either a registration based
-    # method or a an equivalent fieldmap.
+    # method or a rad/sfieldmap.
     # TODO: Apply directly an Hz fieldmap directly into eddy to avoid a double
     # interpolation.
     susceptibility_corrected_dwi = os.path.join(
@@ -935,10 +918,20 @@ if susceptibility_method == "reg":
 
     # t1 has already been registered to dwi by BrainSuite
     shutil.copy(t1_in_dwi_space, t1_to_dwi)
+
+elif susceptibility_method == "topup":
+    flirt(
+        in_file=t1,
+        ref_file=mean_corrected_b0s,
+        dof=6,
+        cost="normmi",
+        out=t1_to_dwi,
+        interp="spline",
+        shfile=inputs["fsl_config"])
 else:
 
-    # For BrainSuite correction, topup correction or no correction, T1 to DWI
-    # transformation matrix has been saved by epi_reg
+    # For B0maps correction or no correction, T1 to DWI transformation matrix
+    # has been saved by epi_reg
     flirt(
         in_file=t1,
         ref_file=corrected_nodiff_undistorted,
