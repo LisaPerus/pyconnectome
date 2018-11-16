@@ -28,8 +28,8 @@ from pydcmio.dcmconverter.converter import dcm2niix
 
 
 def topup(
-        b0s,
-        phase_enc_dirs,
+        concat_b0s,
+        acqp_file,
         readout_time,
         outroot,
         fsl_sh=DEFAULT_FSL_PATH):
@@ -38,10 +38,12 @@ def topup(
 
     Parameters
     ----------
-    b0s: list of str
-        path to b0 file acquired in opposite phase enc. directions.
-    phase_enc_dirs: list of str
-        the phase enc. directions.
+    concat_b0s: str
+        path to concatenated b0 files acquired in opposite phase enc.
+        directions.
+    acqp_file: str
+        path to acqp file
+        (see https://fsl.fmrib.ox.ac.uk/fsl/fslwiki/eddy/UsersGuide#A--acqp)
     readout_time: float
         the readout time.
     outroot: str
@@ -59,53 +61,12 @@ def topup(
         path to the mean unwarped b0 images.
     """
 
-    # Write topup acqp
-    # https://fsl.fmrib.ox.ac.uk/fsl/fslwiki/eddy/UsersGuide
-    if len(b0s) != len(phase_enc_dirs):
-        raise ValueError("Please specify properly the topup input data.")
-    acqp_file = os.path.join(outroot, "acqp.txt")
-    data = []
-    affine = None
-    with open(acqp_file, "wt") as open_file:
-        for enc_dir, path in zip(phase_enc_dirs, b0s):
-            im = nibabel.load(path)
-            if affine is None:
-                affine = im.affine
-            else:
-                assert numpy.allclose(affine, im.affine)
-            arr = im.get_data()
-            for cnt, size in enumerate(arr.shape[:3]):
-                if size % 2 == 1:
-                    print("[warn] reducing TOPUP B0 image size.")
-                    arr = numpy.delete(arr, -1, axis=cnt)
-            if arr.ndim == 3:
-                arr.shape += (1, )
-            data.append(arr)
-            nvol = arr.shape[-1]
-            if enc_dir == "i":
-                row = "1 0 0 {0}".format(readout_time)
-            elif enc_dir == "i-":
-                row = "-1 0 0 {0}".format(readout_time)
-            elif enc_dir == "j":
-                row = "0 1 0 {0}".format(readout_time)
-            elif enc_dir == "j-":
-                row = "0 -1 0 {0}".format(readout_time)
-            else:
-                raise ValueError("Unknown encode phase direction : "
-                                 "{0}...".format(enc_dir))
-            for indx in range(nvol):
-                open_file.write(row + "\n")
-    concatenated_b0s_file = os.path.join(outroot, "concatenated_b0s.nii.gz")
-    concatenated_b0s = numpy.concatenate(data, axis=-1)
-    concatenated_b0s_im = nibabel.Nifti1Image(concatenated_b0s, affine)
-    nibabel.save(concatenated_b0s_im, concatenated_b0s_file)
-
     # The topup command
     fieldmap = os.path.join(outroot, "fieldmap.nii.gz")
     corrected_b0s = os.path.join(outroot, "unwarped_b0s.nii.gz")
     cmd = [
         "topup",
-        "--imain={0}".format(concatenated_b0s_file),
+        "--imain={0}".format(concat_b0s),
         "--datain={0}".format(acqp_file),
         "--config=b02b0.cnf",
         "--out={0}".format(os.path.join(outroot, "topup")),
@@ -174,12 +135,14 @@ def epi_reg(
 
     Returns
     -------
-    corrected_epi_file: str
-        The corrected EPI image.
+    corrected_epi_in_structural_space: str
+        The corrected EPI image in structural image space.
     warp_file: str
-        The deformation field (in mm).
-    distortion_file: str
-        The distortion correction only field (in voxels).
+        The deformation field transforming EPI to EPI corrected volume in
+        structural image space.
+    pixel_shift_map: str
+        The distortion correction only pixel shift map (in voxels) in phase
+        encoding direction.
     """
     # Check the input parameter
     for path in (epi_file, structural_file, brain_structural_file,
@@ -211,16 +174,17 @@ def epi_reg(
     fslprocess()
 
     # Get outputs
-    corrected_epi_file = glob.glob(output_fileroot + ".*")[0]
+    corrected_epi_in_structural_space = glob.glob(
+        output_fileroot + ".nii.gz")[0]
     if fieldmap_file is not None:
         warp_file = glob.glob(output_fileroot + "_warp.*")[0]
-        distortion_file = glob.glob(
+        pixel_shift_map = glob.glob(
             output_fileroot + "_fieldmaprads2epi_shift.*")[0]
     else:
         warp_file = None
-        distortion_file = None
+        pixel_shift_map = None
 
-    return corrected_epi_file, warp_file, distortion_file
+    return corrected_epi_in_structural_space, warp_file, pixel_shift_map
 
 
 def fsl_prepare_fieldmap(
@@ -474,17 +438,18 @@ def get_dcm_info(dicom_dir, outdir, dicom_img=None):
     return dcm_info
 
 
-def get_readout_time(dicom_img, dcm_info, dwell_time):
+def get_readout_time(dcm_info, dwell_time, dicom_img=None):
     """ Get read out time from a dicom image.
 
     Parameters
     ----------
-    dicom_img: dicom.dataset.FileDataset object
-        one of the dicom image loaded by pydicom.
     dcm_info: dict
         array containing dicom data.
     dwell_time: float
         Effective echo spacing in s.
+    dicom_img: dicom.dataset.FileDataset object
+        one of the dicom image loaded by pydicom. Can be set to None for
+        GE or Siemens scanner.
 
     Returns
     -------
@@ -504,9 +469,17 @@ def get_readout_time(dicom_img, dcm_info, dwell_time):
 
     manufacturer = dcm_info["Manufacturer"]
     if manufacturer.upper() in ["SIEMENS", "GE MEDICAL SYSTEMS", "GE"]:
+        if "TotalReadoutTime" not in dcm_info.keys():
+            raise ValueError("TotalReadoutTime not present in {0} "
+                             "dicom extracted json.".format(
+                              manufacturer.upper()))
         readout_time = dcm_info["TotalReadoutTime"]
 
     elif manufacturer.upper() in ["PHILIPS MEDICAL SYSTEMS", "PHILIPS"]:
+        if dicom_img is None:
+            raise ValueError(
+                "Please provide dicom raw data for Philips scanner readout "
+                "time computation.")
         acceleration_factor = dicom_img[int("2005", 16),
                                         int("140f", 16)][0][24, 36969].value
         etl = float(dicom_img[0x0018, 0x0089].value)
@@ -517,7 +490,7 @@ def get_readout_time(dicom_img, dcm_info, dwell_time):
     return readout_time
 
 
-def get_dwell_time(dicom_img, dcm_info):
+def get_dwell_time(dcm_info, dicom_img=None):
     """ Get the dwell time or effective echo spacing.
         Returns effective echo spacing written in dcm_info for Siemens and GE
         scanners and compute it for Philips scanner as described in:
@@ -533,10 +506,11 @@ def get_dwell_time(dicom_img, dcm_info):
 
     Parameters
     ----------
-    dicom_img: dicom.dataset.FileDataset object
-        one of the dicom image loaded by pydicom.
     dcm_info: dict
         array containing dicom data.
+    dicom_img: dicom.dataset.FileDataset object
+        one of the dicom image loaded by pydicom. Set to None for Siemens and
+        GE scanner as information is written in json dicom info.
 
     Returns
     -------
@@ -546,9 +520,17 @@ def get_dwell_time(dicom_img, dcm_info):
     manufacturer = dcm_info["Manufacturer"]
 
     if manufacturer.upper() in ["SIEMENS", "GE MEDICAL SYSTEMS", "GE"]:
+        if "EffectiveEchoSpacing" not in dcm_info.keys():
+            raise ValueError("EffectiveEchoSpacing not present in {0} "
+                             "dicom extracted json.".format(
+                              manufacturer.upper()))
         dwell_time = dcm_info["EffectiveEchoSpacing"]
 
     elif manufacturer.upper() in ["PHILIPS MEDICAL SYSTEMS", "PHILIPS"]:
+        if dicom_img is None:
+            raise ValueError(
+                "Please provide dicom raw data for Philips scanner dwell time "
+                "computation.")
 
         # Compute pixel water fat shift
         gyromagnetic_proton_gamma_ratio = 42.576 * pow(10, 6)  # Hz/T
@@ -719,3 +701,81 @@ def fieldmap_reflect(fieldmap, phase_enc_dir, output_file):
     # Save result
     im_reflect = nibabel.Nifti1Image(arr, im.affine)
     nibabel.save(im_reflect, output_file)
+
+
+def convertwarp(
+                ref,
+                out,
+                premat=None,
+                first_warp=None,
+                midmat=None,
+                second_warp=None,
+                postmat=None,
+                shiftmap=None,
+                shiftdir=None,
+                save_jacobian=False,
+                constrain_jacobian=False,
+                jmin=0.01,
+                jmax=100.0,
+                relative_warp=False,
+                force_output_absolute_warp_convention=False,
+                force_output_relative_warp_convention=False,
+                fsl_sh=DEFAULT_FSL_PATH):
+    """ Wraps FSL convertwarp tool to manipulate warp files.
+
+    Parameters
+    ----------
+    ref: str
+        path to reference volume.
+    out: str
+        path to output warp.
+    premat: str
+        path to pre-affine transform file.
+    first_warp: str
+        path to initial warp (follows pre-affine).
+    midmat: str
+        path to mid-warp-affine transform.
+    second_warp: str
+        path to secondary warp (after initial warp, before post-affine)
+    postmat: str
+        path to post-affine transform file.
+    shiftmap: str
+        path to shiftmap file.
+    shiftdir: str
+        direction to apply shiftmap {x,y,z,x-,y-,z-}.
+    save_jacobian: bool
+        calculate and save Jacobian of final warp field.
+    constrain_jacobian: bool
+        constrain the Jacobian of the warpfield to lie within specified
+        min/max limits, given by jmin and jmax.
+    jmin: float
+        minimum acceptable Jacobian value for constraint.
+    jmax: float
+        maximum acceptable Jacobian value for constraint.
+    relative_warp: bool
+        use relative warp convention: x' = x + w(x).
+    force_output_absolute_warp_convention: bool
+        force output to use absolute warp convention: x' = w(x).
+    force_output_relative_warp_convention: bool
+        force output to use relative warp convention: x' = x + w(x).
+    fsl_sh: str, optional default 'DEFAULT_FSL_PATH'
+        path to fsl setup sh file.
+    """
+    cmd = ["convertwarp", "-r", ref, "-o", out]
+    options = {"--premat": premat, "--warp1": first_warp, "--midmat": midmat,
+               "--warp2": second_warp, "--postmat": postmat,
+               "--shiftmap": shiftmap, "--shiftdir": shiftdir}
+    for option, value in options.items():
+        if value is not None:
+            cmd.append("{0}={1}".format(option, value))
+    cmd.append("--jmin={0}".format(jmin))
+    cmd.append("--jmax={0}".format(jmax))
+    options = {"-j": save_jacobian, "--constrainj": constrain_jacobian,
+               "--rel": relative_warp,
+               "--absout": force_output_absolute_warp_convention,
+               "--relout": force_output_relative_warp_convention}
+    for option, value in options.items():
+        if value is True:
+            cmd.append("{0}".format(option))
+    fslprocess = FSLWrapper(cmd, shfile=fsl_sh)
+    fslprocess()
